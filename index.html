@@ -67,13 +67,20 @@ async function run() {
   const seen = new Set();
   const rows = [];
   const skipped = [];
+  const blockedDays = [];
   try {
     for (const day of DAYS) {
-      const list = await fetchDay(key, day);
+      let list;
+      try {
+        list = await fetchDay(key, day);
+      } catch (e) {
+        blockedDays.push(`${day}: ${e.message}`);
+        continue;
+      }
       for (const f of list) {
         if (!isInternational(f)) continue;
         const d = new Date(f.fixture.date);
-        if (!['2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15'].includes(ksaDay(d))) continue;
+        if (!['2026-11-13', '2026-11-14'].includes(ksaDay(d))) continue;
         if (seen.has(f.fixture.id)) continue;
         seen.add(f.fixture.id);
         const label = `${f.league.name}: ${f.teams.home.name} v ${f.teams.away.name}`;
@@ -98,7 +105,10 @@ async function run() {
 
   rows.sort((a, b) => a.kickoff.localeCompare(b.kickoff));
   $('status').textContent = `${rows.length} matches found, sorted by KSA kickoff. Check the list before running the SQL.`;
-  $('skipped').textContent = skipped.length ? 'Skipped (postponed/cancelled): ' + skipped.join('; ') : '';
+  const notes = [];
+  if (blockedDays.length) notes.push('Not available on your plan: ' + blockedDays.join(' | '));
+  if (skipped.length) notes.push('Skipped (postponed/cancelled): ' + skipped.join('; '));
+  $('skipped').textContent = notes.join('\n');
 
   const values = rows.map(r =>
     `('${esc(r.id)}', '${esc(r.league)}', '${esc(r.home)}', '${esc(r.away)}', '${r.kickoff}')`
