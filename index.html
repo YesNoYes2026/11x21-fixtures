@@ -6,123 +6,128 @@
 <title>11x21 fixture pull</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:12px;background:#111;color:#eee}
-  h1{color:#ffb000}
+  h1{color:#ffb000;font-size:22px}
   input,button,textarea{font-size:15px;padding:8px;margin:4px 0;width:100%;box-sizing:border-box;border-radius:6px;border:1px solid #333;background:#222;color:#eee}
   button{background:#ffb000;color:#111;border:0;font-weight:bold}
-  textarea{height:260px;font-family:monospace;font-size:12px}
+  textarea{height:200px;font-family:monospace;font-size:12px}
   .muted{color:#999;font-size:13px}
-  .warn{color:#ff8a65}
+  .warn{color:#ff8a65;font-size:14px;white-space:pre-line}
+  .list{max-height:320px;overflow:auto;border:1px solid #333;border-radius:6px;padding:6px;margin:6px 0}
+  .list label{display:block;font-size:13px;padding:3px 0;border-bottom:1px solid #222}
+  .list input{width:auto;margin:0 6px 0 0}
 </style>
 </head>
 <body>
 <h1>Fixtures to SQL (KSA time)</h1>
-<p class="muted">Paste your API-Football key below. It is used only in this browser session and is not saved.</p>
+<p class="muted">Paste your API-Football key. It is used only in this page and is not saved.</p>
 <input id="key" type="password" placeholder="API-Football key">
-<button onclick="run()">Pull fixtures 12–15 Nov 2026</button>
+<button onclick="run()">Pull fixtures 13–14 Nov 2026 (KSA)</button>
 <div id="status" class="muted"></div>
-<div id="skipped" class="warn"></div>
+<div id="notes" class="warn"></div>
+<div class="muted">Ticked matches go into the SQL. Untick anything that isn't an international match, tick anything missing.</div>
+<div id="list" class="list"></div>
 <textarea id="out" placeholder="SQL appears here"></textarea>
 <button onclick="copyOut()">Copy SQL</button>
 
 <script>
-const DAYS = ['2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15'];
+// Fetch UTC days that cover KSA Fri 13 and Sat 14 (KSA = UTC+3).
+const UTC_DAYS = ['2026-11-12', '2026-11-13', '2026-11-14'];
+const KSA_DAYS = ['2026-11-13', '2026-11-14'];
 const KSA_MS = 3 * 60 * 60 * 1000;
 const BAD = ['PST', 'CANC', 'ABD', 'AWD', 'WO'];
+const INTL = /friendl|nations league|world cup|qualif|cup of nations|asian cup|arab cup|gold cup|copa america|olympic|euro\b/i;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/'/g, "''");
+const html = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-// Format a Date as KSA (UTC+3) ISO string with explicit offset.
 function ksaIso(d) {
   const t = new Date(d.getTime() + KSA_MS);
   const p = n => String(n).padStart(2, '0');
   return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())}T${p(t.getUTCHours())}:${p(t.getUTCMinutes())}:00+03:00`;
 }
-function ksaDay(d) {
-  return ksaIso(d).slice(0, 10);
-}
+const ksaDay = d => ksaIso(d).slice(0, 10);
 
 async function fetchDay(key, day) {
   const r = await fetch(`https://v3.football.api-sports.io/fixtures?date=${day}`, {
     headers: { 'x-apisports-key': key }
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status} for ${day}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const j = await r.json();
   if (j.errors && Object.keys(j.errors).length) throw new Error(JSON.stringify(j.errors));
   return j.response || [];
 }
 
-function isInternational(f) {
-  const l = f.league || {};
-  return l.country === 'World' || /friendl|nations league|world cup|qualif/i.test(l.name || '');
-}
+let ROWS = [];
 
 async function run() {
   const key = $('key').value.trim();
   if (!key) return alert('Paste your API key first.');
+  ROWS = [];
+  $('notes').textContent = '';
+  $('list').innerHTML = '';
   $('out').value = '';
-  $('skipped').textContent = '';
   $('status').textContent = 'Fetching…';
 
   const seen = new Set();
-  const rows = [];
-  const skipped = [];
-  const blockedDays = [];
-  try {
-    for (const day of DAYS) {
-      let list;
-      try {
-        list = await fetchDay(key, day);
-      } catch (e) {
-        blockedDays.push(`${day}: ${e.message}`);
-        continue;
-      }
-      for (const f of list) {
-        if (!isInternational(f)) continue;
-        const d = new Date(f.fixture.date);
-        if (!['2026-11-13', '2026-11-14'].includes(ksaDay(d))) continue;
-        if (seen.has(f.fixture.id)) continue;
-        seen.add(f.fixture.id);
-        const label = `${f.league.name}: ${f.teams.home.name} v ${f.teams.away.name}`;
-        if (BAD.includes(f.fixture.status.short)) {
-          skipped.push(`${label} (status ${f.fixture.status.short})`);
-          continue;
-        }
-        rows.push({
-          id: 'api' + f.fixture.id,
-          league: f.league.name,
-          home: f.teams.home.name,
-          away: f.teams.away.name,
-          kickoff: ksaIso(d),
-          label: label + ' | KSA ' + ksaIso(d).replace('T', ' ').slice(0, 16)
-        });
-      }
+  const blocked = [];
+  const cancelled = [];
+
+  for (const day of UTC_DAYS) {
+    let list;
+    try { list = await fetchDay(key, day); }
+    catch (e) { blocked.push(`${day}: ${e.message}`); continue; }
+    for (const f of list) {
+      if (seen.has(f.fixture.id)) continue;
+      seen.add(f.fixture.id);
+      const d = new Date(f.fixture.date);
+      if (!KSA_DAYS.includes(ksaDay(d))) continue;
+      const label = `${f.league.name} (${f.league.country}): ${f.teams.home.name} v ${f.teams.away.name}`;
+      if (BAD.includes(f.fixture.status.short)) { cancelled.push(label + ` [${f.fixture.status.short}]`); continue; }
+      ROWS.push({
+        id: 'api' + f.fixture.id,
+        league: f.league.name,
+        home: f.teams.home.name,
+        away: f.teams.away.name,
+        kickoff: ksaIso(d),
+        label,
+        // Pre-tick only when it looks international. Club matches are unticked.
+        checked: (f.league.country === 'World' || INTL.test(f.league.name)) && !/club/i.test(f.league.name)
+      });
     }
-  } catch (e) {
-    $('status').textContent = 'Error: ' + e.message;
-    return;
   }
 
-  rows.sort((a, b) => a.kickoff.localeCompare(b.kickoff));
-  $('status').textContent = `${rows.length} matches found, sorted by KSA kickoff. Check the list before running the SQL.`;
-  const notes = [];
-  if (blockedDays.length) notes.push('Not available on your plan: ' + blockedDays.join(' | '));
-  if (skipped.length) notes.push('Skipped (postponed/cancelled): ' + skipped.join('; '));
-  $('skipped').textContent = notes.join('\n');
+  ROWS.sort((a, b) => a.kickoff.localeCompare(b.kickoff));
+  renderList();
 
-  const values = rows.map(r =>
-    `('${esc(r.id)}', '${esc(r.league)}', '${esc(r.home)}', '${esc(r.away)}', '${r.kickoff}')`
-  );
-  $('out').value = rows.map(r => '-- ' + r.label).join('\n') + '\n\n' +
-    (values.length
-      ? `insert into matches (id, league, home, away, kickoff) values\n${values.join(',\n')}\non conflict (id) do nothing;`
-      : '-- no matches found');
+  const notes = [];
+  if (blocked.length) notes.push('Not available on your plan: ' + blocked.join(' | '));
+  if (cancelled.length) notes.push('Postponed/cancelled (not included): ' + cancelled.join('; '));
+  $('notes').textContent = notes.join('\n');
+  $('status').textContent = `${ROWS.length} fixtures in KSA Fri 13 / Sat 14. ${ROWS.filter(r => r.checked).length} pre-ticked.`;
+}
+
+function renderList() {
+  $('list').innerHTML = ROWS.map((r, i) => `
+    <label><input type="checkbox" data-i="${i}" ${r.checked ? 'checked' : ''} onchange="toggle(${i}, this.checked)">
+      ${r.kickoff.slice(0, 16).replace('T', ' ')} KSA &nbsp; ${html(r.label)}</label>`).join('');
+  buildSql();
+}
+
+function toggle(i, v) { ROWS[i].checked = v; buildSql(); }
+
+function buildSql() {
+  const picked = ROWS.filter(r => r.checked);
+  if (!picked.length) { $('out').value = '-- nothing ticked'; return; }
+  const values = picked.map(r => `('${esc(r.id)}', '${esc(r.league)}', '${esc(r.home)}', '${esc(r.away)}', '${r.kickoff}')`);
+  $('out').value = `insert into matches (id, league, home, away, kickoff) values\n${values.join(',\n')}\non conflict (id) do nothing;`;
+  $('status').textContent = `${picked.length} ticked. SQL updated.`;
 }
 
 function copyOut() {
   $('out').select();
   document.execCommand('copy');
-  $('status').textContent = 'SQL copied. Paste it into Supabase SQL Editor.';
+  $('status').textContent = 'SQL copied. Paste it into the Supabase SQL Editor.';
 }
 </script>
 </body>
